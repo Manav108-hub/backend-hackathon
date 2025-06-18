@@ -1,11 +1,18 @@
-// middleware/authMiddleware.ts
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key';
 
+export interface TokenPayload {
+  id: string;
+  email: string;
+  role: 'admin' | 'user';
+  iat?: number;
+  exp?: number;
+}
+
 export interface AuthRequest extends Request {
-  user?: any;
+  user: TokenPayload;
 }
 
 export const authenticateToken = (
@@ -14,7 +21,7 @@ export const authenticateToken = (
   next: NextFunction
 ): void => {
   const authHeader = req.headers['authorization'];
-  const token = authHeader?.split(' ')[1]; // Bearer <token>
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
 
   if (!token) {
     res.status(401).json({ success: false, error: 'Token required' });
@@ -22,7 +29,7 @@ export const authenticateToken = (
   }
 
   try {
-    const decoded = jwt.verify(token, SECRET_KEY);
+    const decoded = jwt.verify(token, SECRET_KEY) as TokenPayload;
     req.user = decoded;
     next();
   } catch (err) {

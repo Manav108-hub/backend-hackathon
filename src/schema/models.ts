@@ -34,14 +34,16 @@ export interface Product {
   supplier_id?: string;
 }
 
+export interface OrderProduct {
+  product_id: string;
+  quantity: number;
+  price: number;
+}
+
 export interface Order {
   id: string;
   customer_id: string;
-  products: Array<{
-    product_id: string;
-    quantity: number;
-    price: number;
-  }>;
+  products: OrderProduct[];
   status: 'pending' | 'processing' | 'shipped' | 'delivered';
   created_at: string;
   delivery_address: {

@@ -1,78 +1,228 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, RequestHandler } from 'express';
 import { db } from '../config/firebase';
 import { SimulationService } from '../services/simulation';
 import { generateId, getDateRange } from '../utils/helpers';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { authenticateToken } from '../middleware/auth';
-
+import { authenticateToken, AuthRequest } from '../middleware/auth';
 
 const router = Router();
-
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key';
+const ADMIN_KEY = process.env.ADMIN_KEY || 'special_admin_key';
 
+// Type-safe wrapper for middleware
+const authMiddleware = authenticateToken as RequestHandler;
+
+// Register (admin or user)
 router.post('/register', async (req: Request, res: Response): Promise<void> => {
-  const { email, name, password } = req.body;
+  try {
+    const { email, name, password, key } = req.body;
 
-  if (!email || !name || !password) {
-    res.status(400).json({ success: false, error: 'All fields required' });
-    return;
+    if (!email || !name || !password) {
+      res.status(400).json({ success: false, error: 'All fields required' });
+      return;
+    }
+
+    const role = key === ADMIN_KEY ? 'admin' : 'user';
+    const collection = role === 'admin' ? 'admins' : 'users';
+
+    const snapshot = await db.collection(collection).where('email', '==', email).get();
+    if (!snapshot.empty) {
+      res.status(409).json({ success: false, error: `${role} already exists` });
+      return;
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const id = generateId();
+
+    await db.collection(collection).doc(id).set({
+      id,
+      email,
+      name,
+      password: hashedPassword,
+      role,
+      created_at: new Date().toISOString(),
+    });
+
+    res.json({ success: true, message: `${role} registered`, data: { id, email, name, role } });
+  } catch (error) {
+    console.error('Error in registration:', error);
+    res.status(500).json({ success: false, error: 'Registration failed' });
   }
-
-  const snapshot = await db.collection('admins').where('email', '==', email).get();
-  if (!snapshot.empty) {
-    res.status(409).json({ success: false, error: 'Admin already exists' });
-    return;
-  }
-
-  const hashedPassword = await bcrypt.hash(password, 10);
-  const id = generateId();
-  await db.collection('admins').doc(id).set({
-    id,
-    email,
-    name,
-    password: hashedPassword,
-    created_at: new Date().toISOString(),
-  });
-
-  res.json({ success: true, message: 'Admin registered', data: { id, email, name } });
 });
 
+// Login
 router.post('/login', async (req: Request, res: Response): Promise<void> => {
-  const { email, password } = req.body;
+  try {
+    const { email, password } = req.body;
 
-  const snapshot = await db.collection('admins').where('email', '==', email).get();
-  if (snapshot.empty) {
-    res.status(404).json({ success: false, error: 'Admin not found' });
-    return;
+    if (!email || !password) {
+      res.status(400).json({ success: false, error: 'Email and password required' });
+      return;
+    }
+
+    let snapshot = await db.collection('admins').where('email', '==', email).get();
+    let role = 'admin';
+
+    if (snapshot.empty) {
+      snapshot = await db.collection('users').where('email', '==', email).get();
+      role = 'user';
+    }
+
+    if (snapshot.empty) {
+      res.status(404).json({ success: false, error: 'User not found' });
+      return;
+    }
+
+    const user = snapshot.docs[0].data();
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      res.status(401).json({ success: false, error: 'Invalid credentials' });
+      return;
+    }
+
+    const token = jwt.sign({ id: user.id, email: user.email, role }, SECRET_KEY, { expiresIn: '2h' });
+    res.json({ success: true, message: 'Login successful', token });
+  } catch (error) {
+    console.error('Error in login:', error);
+    res.status(500).json({ success: false, error: 'Login failed' });
   }
-
-  const admin = snapshot.docs[0].data();
-  const isMatch = await bcrypt.compare(password, admin.password);
-
-  if (!isMatch) {
-    res.status(401).json({ success: false, error: 'Invalid credentials' });
-    return;
-  }
-
-  const token = jwt.sign({ id: admin.id, email: admin.email }, SECRET_KEY, { expiresIn: '2h' });
-
-  res.json({ success: true, message: 'Login successful', token });
 });
 
-// Health check
-router.get('/health', (req: Request, res: Response): void => {
+// Health Check
+router.get('/health', (_req: Request, res: Response): void => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Get inventory data
-router.get('/inventory', authenticateToken , async (req: Request, res: Response): Promise<void> => {
+// Create Product
+router.post('/product', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = (req as AuthRequest).user;
+    const id = generateId();
+    const product = { id, ...req.body };
+    await db.collection('products').doc(id).set(product);
+    res.json({ success: true, data: product });
+  } catch (error) {
+    console.error('Error creating product:', error);
+    res.status(500).json({ success: false, error: 'Failed to create product' });
+  }
+});
+
+// List Products
+router.get('/product', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const snapshot = await db.collection('products').get();
+    const products = snapshot.docs.map(doc => doc.data());
+    res.json({ success: true, data: products });
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch products' });
+  }
+});
+
+// Get Product by ID
+router.get('/product/:productId', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { productId } = req.params;
+    const doc = await db.collection('products').doc(productId).get();
+
+    if (!doc.exists) {
+      res.status(404).json({ success: false, error: 'Product not found' });
+      return;
+    }
+
+    res.json({ success: true, data: doc.data() });
+  } catch (error) {
+    console.error('Error fetching product:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch product' });
+  }
+});
+
+// Create Order
+router.post('/orders', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = (req as AuthRequest).user;
+
+    if (user.role !== 'user') {
+      res.status(403).json({ success: false, error: 'Only users can create orders' });
+      return;
+    }
+
+    const order = {
+      id: generateId(),
+      customer_id: user.id,
+      ...req.body,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    };
+    await db.collection('orders').doc(order.id).set(order);
+    res.json({ success: true, data: order });
+  } catch (error) {
+    console.error('Error creating order:', error);
+    res.status(500).json({ success: false, error: 'Failed to create order' });
+  }
+});
+
+// List Orders
+router.get('/orders', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = (req as AuthRequest).user;
+
+    const snapshot = user.role === 'admin'
+      ? await db.collection('orders').get()
+      : await db.collection('orders').where('customer_id', '==', user.id).get();
+
+    const orders = snapshot.docs.map(doc => doc.data());
+    res.json({ success: true, data: orders });
+  } catch (error) {
+    console.error('Error fetching orders:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch orders' });
+  }
+});
+
+// Get Order by ID
+router.get('/orders/:orderId', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = (req as AuthRequest).user;
+    const { orderId } = req.params;
+
+    const doc = await db.collection('orders').doc(orderId).get();
+    if (!doc.exists) {
+      res.status(404).json({ success: false, error: 'Order not found' });
+      return;
+    }
+
+    const order = doc.data();
+    if (user.role !== 'admin' && order?.customer_id !== user.id) {
+      res.status(403).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    res.json({ success: true, data: order });
+  } catch (error) {
+    console.error('Error fetching order:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch order' });
+  }
+});
+
+// Admin-Only Middleware
+const isAdmin: RequestHandler = (req: Request, res: Response, next): void => {
+  const user = (req as AuthRequest).user;
+  if (user.role !== 'admin') {
+    res.status(403).json({ success: false, error: 'Admin access only' });
+    return;
+  }
+  next();
+};
+
+// Inventory Logs
+router.get('/inventory', authMiddleware, isAdmin, async (_req: Request, res: Response): Promise<void> => {
   try {
     const snapshot = await db.collection('inventory_updates')
       .orderBy('timestamp', 'desc')
       .limit(100)
       .get();
-
     const inventory = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, data: inventory });
   } catch (error) {
@@ -81,20 +231,19 @@ router.get('/inventory', authenticateToken , async (req: Request, res: Response)
   }
 });
 
-// Get all delivery statuses
-router.get('/delivery', authenticateToken, async (req: Request, res: Response): Promise<void> => {
+// Delivery Statuses
+router.get('/delivery', authMiddleware, isAdmin, async (_req: Request, res: Response): Promise<void> => {
   try {
     const snapshot = await db.collection('delivery_status').get();
     const deliveries = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, data: deliveries });
   } catch (error) {
-    console.error('Error fetching delivery statuses:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch delivery statuses' });
+    console.error('Error fetching delivery:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch delivery' });
   }
 });
 
-// Get single delivery status by orderId
-router.get('/delivery/:orderId', authenticateToken , async (req: Request, res: Response): Promise<void> => {
+router.get('/delivery/:orderId', authMiddleware, isAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
     const { orderId } = req.params;
     const doc = await db.collection('delivery_status').doc(orderId).get();
@@ -111,11 +260,11 @@ router.get('/delivery/:orderId', authenticateToken , async (req: Request, res: R
   }
 });
 
-// Get sales data for analytics
-router.get('/analytics/sales', authenticateToken , async (req: Request, res: Response): Promise<void> => {
+// Sales Analytics
+router.get('/analytics/sales', authMiddleware, isAdmin, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { days = 7 } = req.query;
-    const { start } = getDateRange(Number(days));
+    const days = Number((req.query.days as string) || 7);
+    const { start } = getDateRange(days);
 
     const snapshot = await db.collection('sales_data')
       .where('date', '>=', start)
@@ -130,26 +279,8 @@ router.get('/analytics/sales', authenticateToken , async (req: Request, res: Res
   }
 });
 
-// Create order (for simulation)
-router.post('/orders', authenticateToken , async (req: Request, res: Response): Promise<void> => {
-  try {
-    const orderData = {
-      id: generateId(),
-      ...req.body,
-      status: 'pending' as const,
-      created_at: new Date().toISOString(),
-    };
-
-    await db.collection('orders').doc(orderData.id).set(orderData);
-    res.json({ success: true, data: orderData });
-  } catch (error) {
-    console.error('Error creating order:', error);
-    res.status(500).json({ success: false, error: 'Failed to create order' });
-  }
-});
-
-// Start simulations
-router.post('/simulation/start', authenticateToken,(req: Request, res: Response): void => {
+// Start Simulations
+router.post('/simulation/start', authMiddleware, isAdmin, (_req: Request, res: Response): void => {
   try {
     SimulationService.startInventorySimulation();
     SimulationService.startDeliverySimulation();
@@ -160,16 +291,14 @@ router.post('/simulation/start', authenticateToken,(req: Request, res: Response)
   }
 });
 
-// Generate sample data
-router.post('/simulation/seed',authenticateToken, async (req: Request, res: Response): Promise<void> => {
+// Seed Sample Data
+router.post('/simulation/seed', authMiddleware, isAdmin, async (_req: Request, res: Response): Promise<void> => {
   try {
-    // Generate sample inventory
     for (let i = 0; i < 10; i++) {
       const inventoryData = SimulationService.generateInventoryUpdate();
       await db.collection('inventory_updates').add(inventoryData);
     }
 
-    // Generate sample sales
     for (let i = 0; i < 20; i++) {
       const salesData = SimulationService.generateSalesData();
       await db.collection('sales_data').add(salesData);
