@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3001;
 app.use(cors(
   {
     origin: ['http://localhost:3000',
-      'https://frontend-hackathon-272b.vercel.app'
+      'https://frontend-hackathon-theta.vercel.app',
     ],
     credentials: true
   }
