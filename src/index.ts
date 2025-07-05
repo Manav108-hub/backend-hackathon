@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import routes from './routes/routes';
+import authRoutes from './middleware/auth'; // ✅
+
 
 dotenv.config();
 
@@ -15,6 +17,7 @@ app.use(express.json());
 // Routes
 app.use('/api', routes);
 
+app.use('/api', authRoutes);
 // Health check (optional root)
 app.get('/', (_req, res) => {
   res.send('✅ Server is running.');
@@ -36,3 +39,4 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log(`📡 API endpoints available at http://localhost:${PORT}/api`);
 });
+
