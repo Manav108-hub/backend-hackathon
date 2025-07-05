@@ -1,3 +1,4 @@
+//file: src/routes/routes.ts
 import { Router, Request, Response, RequestHandler } from 'express';
 import { db } from '../config/firebase';
 import { SimulationService } from '../services/simulation';
@@ -5,15 +6,86 @@ import { generateId, getDateRange } from '../utils/helpers';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
+import multer from 'multer';
+import { AIAnalyticsService } from '../utils/aiAnalytics';
 
 const router = Router();
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key';
 const ADMIN_KEY = process.env.ADMIN_KEY || 'special_admin_key';
-
-// Type-safe wrapper for middleware
 const authMiddleware = authenticateToken as RequestHandler;
 
-// Register (admin or user)
+// Admin-Only Middleware
+const isAdmin: RequestHandler = (req: Request, res: Response, next): void => {
+  const user = (req as AuthRequest).user;
+  if (user.role !== 'admin') {
+    res.status(403).json({ success: false, error: 'Admin access only' });
+    return;
+  }
+  next();
+};
+
+// Multer configuration
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed'));
+  }
+});
+
+// ========== AUTH ROUTES ==========
+router.get('/admin/dashboard', authMiddleware, isAdmin, async (_req: Request, res: Response) => {
+  try {
+    const [userSnap, orderSnap] = await Promise.all([
+      db.collection('users').get(),
+      db.collection('orders').get()
+    ]);
+
+    const totalUsers = userSnap.size;
+    const totalOrders = orderSnap.size;
+
+    let totalRevenue = 0;
+    orderSnap.docs.forEach(doc => {
+      const order = doc.data();
+      totalRevenue += Number(order.totalAmount || 0); // Fallback to 0 if field is missing
+    });
+
+    res.json({
+      success: true,
+      message: `Welcome, Admin`,
+      data: {
+        totalUsers,
+        totalOrders,
+        totalRevenue
+      }
+    });
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    res.status(500).json({ success: false, error: 'Failed to load dashboard data' });
+  }
+});
+
+router.get('/admin/dashboard', authMiddleware, isAdmin, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = (req as AuthRequest).user;
+
+    res.json({
+      success: true,
+      message: `Welcome, Admin ${user.email}`,
+      data: {
+        totalUsers: 123,
+        totalOrders: 456,
+        totalRevenue: 7890
+      }
+    });
+  } catch (error) {
+    console.error('Error in admin dashboard:', error);
+    res.status(500).json({ success: false, error: 'Failed to load dashboard' });
+  }
+});
+
+
 router.post('/register', async (req: Request, res: Response): Promise<void> => {
   try {
     const { email, name, password, key } = req.body;
@@ -51,11 +123,9 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// Login
 router.post('/login', async (req: Request, res: Response): Promise<void> => {
   try {
     const { email, password } = req.body;
-
     if (!email || !password) {
       res.status(400).json({ success: false, error: 'Email and password required' });
       return;
@@ -63,7 +133,6 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
 
     let snapshot = await db.collection('admins').where('email', '==', email).get();
     let role = 'admin';
-
     if (snapshot.empty) {
       snapshot = await db.collection('users').where('email', '==', email).get();
       role = 'user';
@@ -76,7 +145,6 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
 
     const user = snapshot.docs[0].data();
     const isMatch = await bcrypt.compare(password, user.password);
-
     if (!isMatch) {
       res.status(401).json({ success: false, error: 'Invalid credentials' });
       return;
@@ -90,12 +158,12 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-// Health Check
+// ========== CORE ROUTES ==========
+
 router.get('/health', (_req: Request, res: Response): void => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Create Product
 router.post('/product', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
     const user = (req as AuthRequest).user;
@@ -109,7 +177,6 @@ router.post('/product', authMiddleware, async (req: Request, res: Response): Pro
   }
 });
 
-// List Products
 router.get('/product', async (_req: Request, res: Response): Promise<void> => {
   try {
     const snapshot = await db.collection('products').get();
@@ -121,17 +188,14 @@ router.get('/product', async (_req: Request, res: Response): Promise<void> => {
   }
 });
 
-// Get Product by ID
 router.get('/product/:productId', async (req: Request, res: Response): Promise<void> => {
   try {
     const { productId } = req.params;
     const doc = await db.collection('products').doc(productId).get();
-
     if (!doc.exists) {
       res.status(404).json({ success: false, error: 'Product not found' });
       return;
     }
-
     res.json({ success: true, data: doc.data() });
   } catch (error) {
     console.error('Error fetching product:', error);
@@ -139,11 +203,11 @@ router.get('/product/:productId', async (req: Request, res: Response): Promise<v
   }
 });
 
-// Create Order
+// ========== ORDER ROUTES ==========
+
 router.post('/orders', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
     const user = (req as AuthRequest).user;
-
     if (user.role !== 'user') {
       res.status(403).json({ success: false, error: 'Only users can create orders' });
       return;
@@ -156,6 +220,7 @@ router.post('/orders', authMiddleware, async (req: Request, res: Response): Prom
       status: 'pending',
       created_at: new Date().toISOString(),
     };
+
     await db.collection('orders').doc(order.id).set(order);
     res.json({ success: true, data: order });
   } catch (error) {
@@ -164,11 +229,9 @@ router.post('/orders', authMiddleware, async (req: Request, res: Response): Prom
   }
 });
 
-// List Orders
 router.get('/orders', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
     const user = (req as AuthRequest).user;
-
     const snapshot = user.role === 'admin'
       ? await db.collection('orders').get()
       : await db.collection('orders').where('customer_id', '==', user.id).get();
@@ -181,7 +244,6 @@ router.get('/orders', authMiddleware, async (req: Request, res: Response): Promi
   }
 });
 
-// Get Order by ID
 router.get('/orders/:orderId', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
     const user = (req as AuthRequest).user;
@@ -206,17 +268,8 @@ router.get('/orders/:orderId', authMiddleware, async (req: Request, res: Respons
   }
 });
 
-// Admin-Only Middleware
-const isAdmin: RequestHandler = (req: Request, res: Response, next): void => {
-  const user = (req as AuthRequest).user;
-  if (user.role !== 'admin') {
-    res.status(403).json({ success: false, error: 'Admin access only' });
-    return;
-  }
-  next();
-};
+// ========== INVENTORY, DELIVERY & SIMULATION ROUTES ==========
 
-// Inventory Logs
 router.get('/inventory', authMiddleware, isAdmin, async (_req: Request, res: Response): Promise<void> => {
   try {
     const snapshot = await db.collection('inventory_updates')
@@ -231,7 +284,6 @@ router.get('/inventory', authMiddleware, isAdmin, async (_req: Request, res: Res
   }
 });
 
-// Delivery Statuses
 router.get('/delivery', authMiddleware, isAdmin, async (_req: Request, res: Response): Promise<void> => {
   try {
     const snapshot = await db.collection('delivery_status').get();
@@ -247,7 +299,6 @@ router.get('/delivery/:orderId', authMiddleware, isAdmin, async (req: Request, r
   try {
     const { orderId } = req.params;
     const doc = await db.collection('delivery_status').doc(orderId).get();
-
     if (!doc.exists) {
       res.status(404).json({ success: false, error: 'Order not found' });
       return;
@@ -260,26 +311,6 @@ router.get('/delivery/:orderId', authMiddleware, isAdmin, async (req: Request, r
   }
 });
 
-// Sales Analytics
-router.get('/analytics/sales', authMiddleware, isAdmin, async (req: Request, res: Response): Promise<void> => {
-  try {
-    const days = Number((req.query.days as string) || 7);
-    const { start } = getDateRange(days);
-
-    const snapshot = await db.collection('sales_data')
-      .where('date', '>=', start)
-      .orderBy('date', 'desc')
-      .get();
-
-    const sales = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.json({ success: true, data: sales });
-  } catch (error) {
-    console.error('Error fetching sales data:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch sales data' });
-  }
-});
-
-// Start Simulations
 router.post('/simulation/start', authMiddleware, isAdmin, (_req: Request, res: Response): void => {
   try {
     SimulationService.startInventorySimulation();
@@ -291,7 +322,6 @@ router.post('/simulation/start', authMiddleware, isAdmin, (_req: Request, res: R
   }
 });
 
-// Seed Sample Data
 router.post('/simulation/seed', authMiddleware, isAdmin, async (_req: Request, res: Response): Promise<void> => {
   try {
     for (let i = 0; i < 10; i++) {
@@ -311,4 +341,127 @@ router.post('/simulation/seed', authMiddleware, isAdmin, async (_req: Request, r
   }
 });
 
+// ========== SALES ANALYTICS ==========
+
+router.get('/analytics/sales', authMiddleware, isAdmin, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const days = Number((req.query.days as string) || 7);
+    const { start } = getDateRange(days);
+
+    const snapshot = await db.collection('sales_data')
+      .where('date', '>=', start)
+      .orderBy('date', 'desc')
+      .get();
+
+    const sales = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json({ success: true, data: sales });
+  } catch (error) {
+    console.error('Error fetching sales data:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch sales data' });
+  }
+});
+// Define SalesData type (temporary fix, update as per your schema)
+type SalesData = {
+  date: string;
+  quantity: number;
+  product_id?: string;
+  [key: string]: any;
+};
+type InventoryData = {
+  timestamp: string;
+  quantity: number;
+  product_id?: string;
+  [key: string]: any;
+};
+
+// ========== AI ANALYTICS ROUTES ==========
+
+// AI Forecast from Sales and Inventory Data
+router.get('/analytics/ai', authMiddleware, isAdmin, async (req: Request, res: Response) => {
+  try {
+    const salesSnapshot = await db.collection('sales_data').get();
+    const inventorySnapshot = await db.collection('inventory_updates').get();
+
+    const salesData = salesSnapshot.docs.map(doc => ({ ...doc.data() })) as SalesData[];
+    const inventoryData = inventorySnapshot.docs.map(doc => doc.data());
+
+    const result = await AIAnalyticsService.getComprehensiveAnalytics(
+      salesData,
+      inventoryData,
+      [], // Optional: historical predictions
+      []  // Optional: actual results
+    );
+
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('AI analytics error:', error);
+    res.status(500).json({ success: false, error: 'Failed to run AI analytics' });
+  }
+});
+
+// AI Vision - Analyze Shelf Image
+router.post('/analytics/image', authMiddleware, isAdmin, upload.single('image'), async (req: Request, res: Response) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ success: false, error: 'No image uploaded' });
+      return;
+    }
+
+    const result = await AIAnalyticsService.analyzeShelfImage(file.buffer);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Image analysis error:', error);
+    res.status(500).json({ success: false, error: 'Failed to analyze image' });
+  }
+});
+
+// AI Forecast of Next 7 Days Sales
+router.get('/analytics/sales/forecast', authMiddleware, isAdmin, async (_req: Request, res: Response) => {
+  try {
+    const snapshot = await db.collection('sales_data').orderBy('date', 'desc').limit(30).get();
+    const salesData = snapshot.docs.map(doc => ({ ...doc.data() })) as SalesData[];
+
+    const result = await AIAnalyticsService.analyzeSalesQuantity(salesData, 30);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Sales forecast error:', error);
+    res.status(500).json({ success: false, error: 'Failed to forecast sales' });
+  }
+});
+
+
 export default router;
+
+// ========== Helper Function ==========
+
+function convertToCSV(data: any): string {
+  const predictions = data.data.predictions.map((p: any) => ({
+    type: 'prediction',
+    id: p.id,
+    prediction_type: p.type,
+    product_id: p.product_id || 'all',
+    created_at: p.created_at,
+    value: JSON.stringify(p.prediction)
+  }));
+
+  const imageAnalyses = data.data.imageAnalyses.map((img: any) => ({
+    type: 'image_analysis',
+    id: img.id,
+    products_detected: img.result?.detectedProducts?.length || 0,
+    shelf_occupancy: img.result?.shelfOccupancy || 0,
+    quality_score: img.result?.visualQualityScore || 0,
+    created_at: img.created_at
+  }));
+
+  const allRows = [...predictions, ...imageAnalyses];
+  if (allRows.length === 0) return 'No data available';
+
+  const headers = Object.keys(allRows[0]);
+  const csvContent = [
+    headers.join(','),
+    ...allRows.map(row => headers.map(header => JSON.stringify(row[header] || '')).join(','))
+  ].join('\n');
+
+  return csvContent;
+}
