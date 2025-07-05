@@ -1,0 +1,42 @@
+{
+  "salesQuantity_3486fe454085cd2f1e70d3655cd414dc251ccb14dec5f3cb34b8a1992dc08cd0": {
+    "prediction": 150,
+    "confidence": 30,
+    "factors": [
+      "\"key_factors\": [",
+      "\"Lack of external factors (seasonality, promotions)\""
+    ]
+  },
+  "stockLevels_899e15a970adcbc50b8c58320e982a31c0f759988c3e1fd1e57384212c44bb97": {
+    "prediction": 100,
+    "status": "optimal",
+    "recommendation": "\"recommendations\": ["
+  },
+  "stockoutSales_899e15a970adcbc50b8c58320e982a31c0f759988c3e1fd1e57384212c44bb97": {
+    "stockoutRisk": {
+      "probability": 10,
+      "timeline": "2-3 weeks",
+      "preventionActions": [
+        "\"preventionActions\": [",
+        "\"action\": \"Increase Stock Levels Immediately\",",
+        "\"action\": \"Monitor Stock Levels Closely\","
+      ]
+    },
+    "salesVolume": {
+      "prediction": 1000,
+      "trend": "increasing",
+      "seasonalFactors": [
+        "\"suggestion\": \"Incorporate external factors (seasonality, promotions, marketing campaigns) into a predictive sales model to better manage inventory.\"",
+        "\"trend\": {",
+        "\"seasonalFactors\": \"Not enough data to determine seasonal factors.  More historical sales data is needed across different seasons to identify trends and patterns.\""
+      ]
+    }
+  },
+  "salesQuantity_e20891881f9726a4a83e9e8454cfd2fc13032e469d6fcae662d2e042e87adbc5": {
+    "prediction": 0,
+    "confidence": 60,
+    "factors": [
+      "\"key_factors\": ["
+    ]
+  }
+}

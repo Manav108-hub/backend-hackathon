@@ -2,6 +2,9 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import vision from '@google-cloud/vision';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
 dotenv.config();
 
 // Initialize Gemini AI
@@ -15,7 +18,30 @@ const RATE_LIMIT_CONFIG = {
   retryDelay: 30000, // 30 seconds
   maxRetries: 3
 };
+const CACHE_PATH = path.resolve(__dirname, '../cache/ai-cache.json');
 
+// Ensure the cache file exists
+if (!fs.existsSync(CACHE_PATH)) {
+  fs.mkdirSync(path.dirname(CACHE_PATH), { recursive: true });
+  fs.writeFileSync(CACHE_PATH, JSON.stringify({}), 'utf-8');
+}
+
+function loadCache(): Record<string, any> {
+  try {
+    return JSON.parse(fs.readFileSync(CACHE_PATH, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveCache(cache: Record<string, any>) {
+  fs.writeFileSync(CACHE_PATH, JSON.stringify(cache, null, 2), 'utf-8');
+}
+
+function getCacheKey(prefix: string, data: any): string {
+  const hash = crypto.createHash('sha256').update(JSON.stringify(data)).digest('hex');
+  return `${prefix}_${hash}`;
+}
 // In-memory rate limiting (use Redis in production)
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
 
@@ -90,16 +116,16 @@ export class AIAnalyticsService {
   private static checkRateLimit(key: string = 'gemini_api'): boolean {
     const now = Date.now();
     const record = rateLimitStore.get(key);
-    
+
     if (!record || now > record.resetTime) {
       rateLimitStore.set(key, { count: 1, resetTime: now + RATE_LIMIT_CONFIG.requestWindow });
       return true;
     }
-    
+
     if (record.count >= RATE_LIMIT_CONFIG.maxRequestsPerHour) {
       return false;
     }
-    
+
     record.count++;
     rateLimitStore.set(key, record);
     return true;
@@ -138,30 +164,30 @@ export class AIAnalyticsService {
     const recentSales = salesData.slice(-7); // Last 7 days
     const avgDailySales = recentSales.reduce((sum, sale) => sum + (sale.quantity || 0), 0) / Math.max(1, recentSales.length);
     const totalRevenue = recentSales.reduce((sum, sale) => sum + (sale.revenue || 0), 0);
-    
+
     const currentStock = inventoryData.reduce((sum, item) => sum + (item.current_stock || 0), 0);
     const avgReorderLevel = inventoryData.reduce((sum, item) => sum + (item.reorder_level || 0), 0) / Math.max(1, inventoryData.length);
-    
+
     // Simple trend analysis
     const firstHalf = recentSales.slice(0, Math.floor(recentSales.length / 2));
     const secondHalf = recentSales.slice(Math.floor(recentSales.length / 2));
-    
+
     const firstHalfAvg = firstHalf.reduce((sum, sale) => sum + (sale.quantity || 0), 0) / Math.max(1, firstHalf.length);
     const secondHalfAvg = secondHalf.reduce((sum, sale) => sum + (sale.quantity || 0), 0) / Math.max(1, secondHalf.length);
-    
-    const trendDirection = secondHalfAvg > firstHalfAvg * 1.1 ? 'increasing' : 
+
+    const trendDirection = secondHalfAvg > firstHalfAvg * 1.1 ? 'increasing' :
                           secondHalfAvg < firstHalfAvg * 0.9 ? 'decreasing' : 'stable';
-    
+
     // Stock status determination
     const stockRatio = currentStock / Math.max(1, avgReorderLevel);
-    const stockStatus = stockRatio < 0.5 ? 'critical' : 
-                       stockRatio < 1 ? 'low' : 
+    const stockStatus = stockRatio < 0.5 ? 'critical' :
+                       stockRatio < 1 ? 'low' :
                        stockRatio > 3 ? 'overstocked' : 'optimal';
-    
+
     // Stockout risk calculation
     const daysUntilStockout = Math.max(0, currentStock / Math.max(1, avgDailySales));
-    const stockoutProbability = daysUntilStockout < 7 ? 80 : 
-                               daysUntilStockout < 14 ? 40 : 
+    const stockoutProbability = daysUntilStockout < 7 ? 80 :
+                               daysUntilStockout < 14 ? 40 :
                                daysUntilStockout < 21 ? 20 : 10;
 
     return {
@@ -201,169 +227,222 @@ export class AIAnalyticsService {
    * Analyze sales quantity with fallback
    */
   static async analyzeSalesQuantity(salesData: SalesData[], days: number = 30): Promise<AnalyticsResult['salesQuantity']> {
-    try {
-      if (!this.checkRateLimit('sales_analysis')) {
-        console.log('Rate limit exceeded, using fallback analytics');
-        const fallback = this.generateFallbackAnalytics(salesData, []);
-        return fallback.salesQuantity;
-      }
+  const cache = loadCache();
+  const cacheKey = getCacheKey('salesQuantity', salesData.slice(-days));
 
-      const prompt = `
-        Analyze the following sales data and predict future sales quantity:
-        Sales Data (Last ${days} days):
-        ${JSON.stringify(salesData.slice(-20), null, 2)}
+  if (cache[cacheKey]) {
+    console.log('[CACHE HIT] salesQuantity');
+    return cache[cacheKey];
+  }
 
-        Provide prediction, confidence (0-100), and key factors as JSON.
-        Keep response concise to minimize token usage.
-      `;
-
-      const result = await this.retryWithBackoff(async () => {
-        return await model.generateContent(prompt);
-      });
-
-      const response = result.response.text();
-      
-      try {
-        const parsed = JSON.parse(response);
-        return {
-          prediction: parsed.prediction || 0,
-          confidence: parsed.confidence || 0,
-          factors: parsed.factors || []
-        };
-      } catch {
-        return {
-          prediction: this.extractNumber(response, 'prediction') || 0,
-          confidence: this.extractNumber(response, 'confidence') || 75,
-          factors: this.extractFactors(response)
-        };
-      }
-    } catch (error: any) {
-      console.error('Error in sales quantity analysis:', error.message);
-      
-      // Use fallback analytics
+  try {
+    if (!this.checkRateLimit('sales_analysis')) {
+      console.log('Rate limit exceeded, using fallback analytics');
       const fallback = this.generateFallbackAnalytics(salesData, []);
       return fallback.salesQuantity;
     }
+
+    const prompt = `
+      Analyze the following sales data and predict future sales quantity:
+      Sales Data (Last ${days} days):
+      ${JSON.stringify(salesData.slice(-20), null, 2)}
+
+      Provide prediction, confidence (0-100), and key factors as JSON.
+      Keep response concise to minimize token usage.
+    `;
+
+    const result = await this.retryWithBackoff(async () => {
+      return await model.generateContent(prompt);
+    });
+
+    const response = result.response.text();
+
+    try {
+      const parsed = JSON.parse(response);
+
+      const finalResult = {
+        prediction: parsed.prediction || 0,
+        confidence: parsed.confidence || 0,
+        factors: parsed.factors || []
+      };
+
+      cache[cacheKey] = finalResult;
+      saveCache(cache);
+
+      return finalResult;
+    } catch {
+      const fallbackParsed = {
+        prediction: this.extractNumber(response, 'prediction') || 0,
+        confidence: this.extractNumber(response, 'confidence') || 75,
+        factors: this.extractFactors(response)
+      };
+
+      cache[cacheKey] = fallbackParsed;
+      saveCache(cache);
+
+      return fallbackParsed;
+    }
+  } catch (error: any) {
+    console.error('Error in sales quantity analysis:', error.message);
+
+    const fallback = this.generateFallbackAnalytics(salesData, []);
+    return fallback.salesQuantity;
   }
+}
+
 
   /**
    * Analyze stock levels with fallback
    */
   static async analyzeStockLevels(inventoryData: InventoryData[], salesData: SalesData[]): Promise<AnalyticsResult['stockLevels']> {
-    try {
-      if (!this.checkRateLimit('stock_analysis')) {
-        console.log('Rate limit exceeded, using fallback analytics');
-        const fallback = this.generateFallbackAnalytics(salesData, inventoryData);
-        return fallback.stockLevels;
-      }
+  const cache = loadCache();
+  const cacheKey = getCacheKey('stockLevels', [...inventoryData, ...salesData]);
 
-      const prompt = `
-        Analyze stock levels and sales patterns:
-        Inventory: ${JSON.stringify(inventoryData.slice(0, 10), null, 2)}
-        Recent Sales: ${JSON.stringify(salesData.slice(-10), null, 2)}
+  if (cache[cacheKey]) {
+    console.log('[CACHE HIT] stockLevels');
+    return cache[cacheKey];
+  }
 
-        Provide: prediction, status (optimal/low/critical/overstocked), recommendation as JSON.
-      `;
-
-      const result = await this.retryWithBackoff(async () => {
-        return await model.generateContent(prompt);
-      });
-
-      const response = result.response.text();
-
-      try {
-        const parsed = JSON.parse(response);
-        return {
-          prediction: parsed.prediction || 0,
-          status: parsed.status || 'optimal',
-          recommendation: parsed.recommendation || 'Monitor current levels'
-        };
-      } catch {
-        return {
-          prediction: this.extractNumber(response, 'prediction') || 100,
-          status: this.extractStatus(response) as any || 'optimal',
-          recommendation: this.extractRecommendation(response)
-        };
-      }
-    } catch (error: any) {
-      console.error('Error in stock level analysis:', error.message);
-      
-      // Use fallback analytics
+  try {
+    if (!this.checkRateLimit('stock_analysis')) {
+      console.log('Rate limit exceeded, using fallback analytics');
       const fallback = this.generateFallbackAnalytics(salesData, inventoryData);
       return fallback.stockLevels;
     }
+
+    const prompt = `
+      Analyze stock levels and sales patterns:
+      Inventory: ${JSON.stringify(inventoryData.slice(0, 10), null, 2)}
+      Recent Sales: ${JSON.stringify(salesData.slice(-10), null, 2)}
+
+      Provide: prediction, status (optimal/low/critical/overstocked), recommendation as JSON.
+    `;
+
+    const result = await this.retryWithBackoff(async () => {
+      return await model.generateContent(prompt);
+    });
+
+    const response = result.response.text();
+
+    try {
+      const parsed = JSON.parse(response);
+      const finalResult = {
+        prediction: parsed.prediction || 0,
+        status: parsed.status || 'optimal',
+        recommendation: parsed.recommendation || 'Monitor current levels'
+      };
+
+      cache[cacheKey] = finalResult;
+      saveCache(cache);
+
+      return finalResult;
+    } catch {
+      const fallbackParsed = {
+        prediction: this.extractNumber(response, 'prediction') || 100,
+        status: this.extractStatus(response) as any || 'optimal',
+        recommendation: this.extractRecommendation(response)
+      };
+
+      cache[cacheKey] = fallbackParsed;
+      saveCache(cache);
+
+      return fallbackParsed;
+    }
+  } catch (error: any) {
+    console.error('Error in stock level analysis:', error.message);
+    const fallback = this.generateFallbackAnalytics(salesData, inventoryData);
+    return fallback.stockLevels;
   }
+}
+
 
   /**
    * Analyze stockout risk and sales volume with fallback
    */
-  static async analyzeStockoutAndSalesVolume(
-    inventoryData: InventoryData[],
-    salesData: SalesData[]
-  ): Promise<{ stockoutRisk: AnalyticsResult['stockoutRisk']; salesVolume: AnalyticsResult['salesVolume'] }> {
-    try {
-      if (!this.checkRateLimit('stockout_analysis')) {
-        console.log('Rate limit exceeded, using fallback analytics');
-        const fallback = this.generateFallbackAnalytics(salesData, inventoryData);
-        return {
-          stockoutRisk: fallback.stockoutRisk,
-          salesVolume: fallback.salesVolume
-        };
-      }
+static async analyzeStockoutAndSalesVolume(
+  inventoryData: InventoryData[],
+  salesData: SalesData[]
+): Promise<{ stockoutRisk: AnalyticsResult['stockoutRisk']; salesVolume: AnalyticsResult['salesVolume'] }> {
+  const cache = loadCache();
+  const cacheKey = getCacheKey('stockoutSales', [...inventoryData, ...salesData]);
 
-      const prompt = `
-        Analyze stockout risk and sales trends:
-        Inventory: ${JSON.stringify(inventoryData.slice(0, 5), null, 2)}
-        Sales: ${JSON.stringify(salesData.slice(-10), null, 2)}
+  if (cache[cacheKey]) {
+    console.log('[CACHE HIT] stockoutSales');
+    return cache[cacheKey];
+  }
 
-        Provide: stockoutProbability, timeline, preventionActions, salesVolumePrediction, trend, seasonalFactors as JSON.
-      `;
-
-      const result = await this.retryWithBackoff(async () => {
-        return await model.generateContent(prompt);
-      });
-
-      const response = result.response.text();
-
-      try {
-        const parsed = JSON.parse(response);
-        return {
-          stockoutRisk: {
-            probability: parsed.stockoutProbability || 0,
-            timeline: parsed.timeline || 'Unknown',
-            preventionActions: parsed.preventionActions || []
-          },
-          salesVolume: {
-            prediction: parsed.salesVolumePrediction || 0,
-            trend: parsed.trend || 'stable',
-            seasonalFactors: parsed.seasonalFactors || []
-          }
-        };
-      } catch {
-        return {
-          stockoutRisk: {
-            probability: this.extractNumber(response, 'probability') || 10,
-            timeline: this.extractTimeline(response),
-            preventionActions: this.extractActions(response)
-          },
-          salesVolume: {
-            prediction: this.extractNumber(response, 'volume') || 1000,
-            trend: this.extractTrend(response) as any || 'stable',
-            seasonalFactors: this.extractSeasonalFactors(response)
-          }
-        };
-      }
-    } catch (error: any) {
-      console.error('Error in stockout and sales volume analysis:', error.message);
-      
-      // Use fallback analytics
+  try {
+    if (!this.checkRateLimit('stockout_analysis')) {
+      console.log('Rate limit exceeded, using fallback analytics');
       const fallback = this.generateFallbackAnalytics(salesData, inventoryData);
       return {
         stockoutRisk: fallback.stockoutRisk,
         salesVolume: fallback.salesVolume
       };
     }
+
+    const prompt = `
+      Analyze stockout risk and sales trends:
+      Inventory: ${JSON.stringify(inventoryData.slice(0, 5), null, 2)}
+      Sales: ${JSON.stringify(salesData.slice(-10), null, 2)}
+
+      Provide: stockoutProbability, timeline, preventionActions, salesVolumePrediction, trend, seasonalFactors as JSON.
+    `;
+
+    const result = await this.retryWithBackoff(async () => {
+      return await model.generateContent(prompt);
+    });
+
+    const response = result.response.text();
+
+    try {
+      const parsed = JSON.parse(response);
+      const finalResult = {
+        stockoutRisk: {
+          probability: parsed.stockoutProbability || 0,
+          timeline: parsed.timeline || 'Unknown',
+          preventionActions: parsed.preventionActions || []
+        },
+        salesVolume: {
+          prediction: parsed.salesVolumePrediction || 0,
+          trend: parsed.trend || 'stable',
+          seasonalFactors: parsed.seasonalFactors || []
+        }
+      };
+
+      cache[cacheKey] = finalResult;
+      saveCache(cache);
+
+      return finalResult;
+    } catch {
+      const fallbackParsed = {
+        stockoutRisk: {
+          probability: this.extractNumber(response, 'probability') || 10,
+          timeline: this.extractTimeline(response),
+          preventionActions: this.extractActions(response)
+        },
+        salesVolume: {
+          prediction: this.extractNumber(response, 'volume') || 1000,
+          trend: this.extractTrend(response) as any || 'stable',
+          seasonalFactors: this.extractSeasonalFactors(response)
+        }
+      };
+
+      cache[cacheKey] = fallbackParsed;
+      saveCache(cache);
+
+      return fallbackParsed;
+    }
+  } catch (error: any) {
+    console.error('Error in stockout and sales volume analysis:', error.message);
+    const fallback = this.generateFallbackAnalytics(salesData, inventoryData);
+    return {
+      stockoutRisk: fallback.stockoutRisk,
+      salesVolume: fallback.salesVolume
+    };
   }
+}
+
 
   /**
    * Get comprehensive analytics with intelligent fallbacks
@@ -396,7 +475,7 @@ export class AIAnalyticsService {
       };
     } catch (error: any) {
       console.error('Error in comprehensive analytics:', error.message);
-      
+
       // Final fallback
       return this.generateFallbackAnalytics(salesData, inventoryData);
     }
@@ -418,7 +497,7 @@ export class AIAnalyticsService {
 
   private static getPreventionActions(status: string, daysUntilStockout: number): string[] {
     const actions = [];
-    
+
     if (daysUntilStockout < 7) {
       actions.push('Place emergency order immediately');
       actions.push('Contact suppliers for expedited delivery');
@@ -429,14 +508,14 @@ export class AIAnalyticsService {
       actions.push('Continue regular monitoring');
       actions.push('Review supplier lead times');
     }
-    
+
     return actions;
   }
 
   private static getSeasonalFactors(date: Date): string[] {
     const month = date.getMonth();
     const factors = [];
-    
+
     if (month >= 10 || month <= 1) {
       factors.push('Holiday season demand increase');
     }
@@ -446,7 +525,7 @@ export class AIAnalyticsService {
     if (month >= 2 && month <= 4) {
       factors.push('Spring restocking period');
     }
-    
+
     return factors;
   }
 
