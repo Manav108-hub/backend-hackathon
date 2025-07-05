@@ -4,6 +4,7 @@ import { SimulationService } from '../services/simulation';
 import { db } from '../config/firebase';
 import { AIAnalyticsService } from '../utils/aiAnalytics';
 import { getDateRange } from '../utils/helpers';
+
 const router = express.Router();
 const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key';
 
